@@ -1,0 +1,19 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Alexa Thermostat Bridge",
+        "data": {
+          "name": "Name",
+          "temperature_sensor": "Temperature sensor (from alexa_media_player)",
+          "echo_entity": "Echo to relay commands through",
+          "min_temp": "Minimum temperature",
+          "max_temp": "Maximum temperature"
+        }
+      }
+    },
+    "abort": {
+      "already_configured": "This sensor/Echo pair is already configured"
+    }
+  }
+}
