@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from homeassistant.components.climate import (
+    ATTR_TARGET_TEMP_HIGH,
+    ATTR_TARGET_TEMP_LOW,
     ClimateEntity,
     ClimateEntityFeature,
     HVACMode,
@@ -14,7 +16,8 @@ from homeassistant.helpers.restore_state import RestoreEntity
 
 from .const import CONF_ECHO_ENTITY, CONF_MAX_TEMP, CONF_MIN_TEMP, CONF_TEMPERATURE_SENSOR
 
-MODES = [HVACMode.OFF, HVACMode.HEAT, HVACMode.COOL, HVACMode.AUTO]
+# HEAT_COOL, not AUTO, is HA's mode for a user-adjustable heat/cool range.
+MODES = [HVACMode.OFF, HVACMode.HEAT, HVACMode.COOL, HVACMode.HEAT_COOL]
 
 
 async def async_setup_entry(
@@ -25,21 +28,28 @@ async def async_setup_entry(
 
 class AlexaBridgeClimate(ClimateEntity, RestoreEntity):
     _attr_hvac_modes = MODES
-    _attr_supported_features = ClimateEntityFeature.TARGET_TEMPERATURE
+    _attr_supported_features = (
+        ClimateEntityFeature.TARGET_TEMPERATURE
+        | ClimateEntityFeature.TARGET_TEMPERATURE_RANGE
+    )
     _attr_temperature_unit = UnitOfTemperature.FAHRENHEIT
     _attr_should_poll = False
 
     def __init__(self, hass: HomeAssistant, entry: ConfigEntry) -> None:
         self.hass = hass
         self._entry = entry
+        config = {**entry.data, **entry.options}
         self._attr_unique_id = entry.entry_id
         self._attr_name = entry.data["name"]
-        self._sensor_entity_id = entry.data[CONF_TEMPERATURE_SENSOR]
-        self._echo_entity_id = entry.data[CONF_ECHO_ENTITY]
-        self._attr_min_temp = entry.data[CONF_MIN_TEMP]
-        self._attr_max_temp = entry.data[CONF_MAX_TEMP]
+        self._sensor_entity_id = config[CONF_TEMPERATURE_SENSOR]
+        self._echo_entity_id = config[CONF_ECHO_ENTITY]
+        self._attr_min_temp = config[CONF_MIN_TEMP]
+        self._attr_max_temp = config[CONF_MAX_TEMP]
         self._attr_hvac_mode = HVACMode.OFF
-        self._attr_target_temperature = (self._attr_min_temp + self._attr_max_temp) / 2
+        mid = (self._attr_min_temp + self._attr_max_temp) / 2
+        self._attr_target_temperature = mid
+        self._attr_target_temperature_low = mid - 2
+        self._attr_target_temperature_high = mid + 2
         self._attr_current_temperature = None
 
     async def async_added_to_hass(self) -> None:
@@ -52,6 +62,12 @@ class AlexaBridgeClimate(ClimateEntity, RestoreEntity):
             last_target = last_state.attributes.get(ATTR_TEMPERATURE)
             if last_target is not None:
                 self._attr_target_temperature = last_target
+            last_low = last_state.attributes.get(ATTR_TARGET_TEMP_LOW)
+            if last_low is not None:
+                self._attr_target_temperature_low = last_low
+            last_high = last_state.attributes.get(ATTR_TARGET_TEMP_HIGH)
+            if last_high is not None:
+                self._attr_target_temperature_high = last_high
 
         sensor_state = self.hass.states.get(self._sensor_entity_id)
         if sensor_state is not None:
@@ -90,16 +106,35 @@ class AlexaBridgeClimate(ClimateEntity, RestoreEntity):
 
     async def async_set_temperature(self, **kwargs) -> None:
         temperature = kwargs.get(ATTR_TEMPERATURE)
-        if temperature is None:
+        if temperature is not None:
+            self._attr_target_temperature = temperature
+            self.async_write_ha_state()
+            await self._send_command(
+                f"set {self._attr_name} to {round(temperature)} degrees"
+            )
             return
-        self._attr_target_temperature = temperature
+
+        low = kwargs.get(ATTR_TARGET_TEMP_LOW)
+        high = kwargs.get(ATTR_TARGET_TEMP_HIGH)
+        if low is not None:
+            self._attr_target_temperature_low = low
+        if high is not None:
+            self._attr_target_temperature_high = high
         self.async_write_ha_state()
-        await self._send_command(
-            f"set {self._attr_name} to {round(temperature)} degrees"
-        )
+        # Untested phrasing - Alexa's range-setpoint voice grammar isn't
+        # documented; adjust these two strings if the thermostat ignores them.
+        if low is not None:
+            await self._send_command(f"set {self._attr_name} heat to {round(low)} degrees")
+        if high is not None:
+            await self._send_command(f"set {self._attr_name} cool to {round(high)} degrees")
 
     async def async_set_hvac_mode(self, hvac_mode: HVACMode) -> None:
         self._attr_hvac_mode = hvac_mode
         self.async_write_ha_state()
-        mode_word = "off" if hvac_mode == HVACMode.OFF else hvac_mode.value
+        if hvac_mode == HVACMode.OFF:
+            mode_word = "off"
+        elif hvac_mode == HVACMode.HEAT_COOL:
+            mode_word = "auto"
+        else:
+            mode_word = hvac_mode.value
         await self._send_command(f"set {self._attr_name} to {mode_word}")
