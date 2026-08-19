@@ -61,6 +61,7 @@ class AlexaBridgeClimate(ClimateEntity, RestoreEntity):
     )
     _attr_temperature_unit = UnitOfTemperature.FAHRENHEIT
     _attr_should_poll = False
+    _attr_translation_key = "alexa_bridge_thermostat"
 
     def __init__(self, hass: HomeAssistant, entry: ConfigEntry) -> None:
         self.hass = hass
@@ -90,6 +91,10 @@ class AlexaBridgeClimate(ClimateEntity, RestoreEntity):
         if last_state is not None:
             if last_state.state in MODES:
                 self._attr_hvac_mode = HVACMode(last_state.state)
+            elif last_state.state == "auto":
+                # Pre-1.1.0 stored HVACMode.AUTO ("auto"); that value isn't
+                # in MODES anymore since range setpoints need HEAT_COOL.
+                self._attr_hvac_mode = HVACMode.HEAT_COOL
             last_target = last_state.attributes.get(ATTR_TEMPERATURE)
             if last_target is not None:
                 self._attr_target_temperature = last_target
