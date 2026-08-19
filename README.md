@@ -1,13 +1,15 @@
+<p align="center"><img src="logo.svg" width="96" height="96" alt="Alexa Thermostat Bridge logo"></p>
+
 # Alexa Thermostat Bridge
 
-Home Assistant custom integration that wraps an Amazon Smart Thermostat as a real `climate` entity.
+Home Assistant custom integration that wraps an Amazon Smart Thermostat as a real `climate` entity, including a dual-setpoint Auto range.
 
 Amazon's thermostat has no local API and isn't supported by any HA-native integration. This bridges it by:
 
-- **Reading** current temperature from a `sensor` entity already created by [alexa_media_player](https://github.com/alandtse/alexa_media_player) (HACS).
-- **Writing** by relaying commands to an Echo via `media_player.play_media` (`media_content_type: custom`), the same mechanism as typing a command in the Alexa app — Alexa's own voice NLU routes it to the thermostat, so there's no private API to reverse-engineer.
+- **Reading** current temperature/humidity/mode/setpoints by polling Alexa's device-state API every 5 minutes, reusing the authenticated session from [alexa_media_player](https://github.com/alandtse/alexa_media_player) (HACS) — falls back to a plain temperature `sensor` if no Alexa entity ID is configured.
+- **Writing** by relaying commands to an Echo via `media_player.play_media` (`media_content_type: custom`), the same mechanism as typing a command in the Alexa app — Alexa's own voice NLU routes it to the thermostat, so there's no private API to reverse-engineer. Dial-drag commands are debounced 8s before sending.
 
-Target temperature and HVAC mode persist across HA restarts via `RestoreEntity`. No YAML, no MQTT, no helper entities — setup is entirely through the UI.
+Target temperature, range, and HVAC mode persist across HA restarts via `RestoreEntity`. No YAML, no MQTT, no helper entities — setup is entirely through the UI.
 
 ## Requirements
 
@@ -36,5 +38,5 @@ A `climate` entity appears immediately — add a **Thermostat** card for it.
 
 ## Known limitations
 
-- Fire-and-forget: no confirmation the thermostat obeyed the command, since Alexa doesn't report thermostat setpoint/mode back to us.
-- "Auto" mode uses a single target temperature rather than separate heat/cool setpoints.
+- Commands are fire-and-forget on send; confirmation only arrives on the next poll cycle (up to 5 minutes later) unless an Alexa entity ID is configured for polling.
+- Without an Alexa entity ID configured, there's no readback of mode/setpoints/humidity at all — only the plain temperature sensor.
