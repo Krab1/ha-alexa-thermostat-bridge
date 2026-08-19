@@ -333,16 +333,14 @@ class AlexaBridgeClimate(ClimateEntity, RestoreEntity):
             self._range_high = high
         self._sync_target_attrs()
         self.async_write_ha_state()
-        # Untested phrasing - Alexa's range-setpoint voice grammar isn't
-        # documented; adjust these two strings if the thermostat ignores them.
-        if low is not None:
-            self._schedule_command(
-                "low", f"set {self._attr_name} heat to {round(low)} degrees"
-            )
-        if high is not None:
-            self._schedule_command(
-                "high", f"set {self._attr_name} cool to {round(high)} degrees"
-            )
+        # Confirmed working phrasing (user-tested against the real device):
+        # a single combined command, not separate heat/cool commands -
+        # Alexa needs both endpoints together for "keep between".
+        self._schedule_command(
+            "range",
+            f"set {self._attr_name} to keep between"
+            f" {round(self._range_low)} and {round(self._range_high)} degrees",
+        )
 
     async def async_set_hvac_mode(self, hvac_mode: HVACMode) -> None:
         self._attr_hvac_mode = hvac_mode
