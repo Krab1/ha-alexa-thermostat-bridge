@@ -346,13 +346,12 @@ class AlexaBridgeClimate(ClimateEntity, RestoreEntity):
             self._range_high = high
         self._sync_target_attrs()
         self.async_write_ha_state()
-        # Confirmed working phrasing (user-tested against the real device):
-        # a single combined command, not separate heat/cool commands -
-        # Alexa needs both endpoints together for "keep between".
+        # Always resend the full range, even if only one handle moved -
+        # Alexa needs both endpoints together in one combined command.
         self._schedule_command(
             "range",
-            f"set {self._attr_name} to keep between"
-            f" {round(self._range_low)} and {round(self._range_high)} degrees",
+            f"set {self._attr_name} range to"
+            f" {round(self._range_low)} to {round(self._range_high)}",
         )
 
     async def async_set_hvac_mode(self, hvac_mode: HVACMode) -> None:
