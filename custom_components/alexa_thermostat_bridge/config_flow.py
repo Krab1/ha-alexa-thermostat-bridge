@@ -7,6 +7,7 @@ from homeassistant.core import callback
 from homeassistant.helpers import selector
 
 from .const import (
+    CONF_ALEXA_ENTITY_ID,
     CONF_ECHO_ENTITY,
     CONF_MAX_TEMP,
     CONF_MIN_TEMP,
@@ -27,6 +28,10 @@ DATA_SCHEMA = vol.Schema(
         ),
         vol.Required(CONF_MIN_TEMP, default=DEFAULT_MIN_TEMP): vol.Coerce(float),
         vol.Required(CONF_MAX_TEMP, default=DEFAULT_MAX_TEMP): vol.Coerce(float),
+        # Optional: the internal Alexa entityId (a UUID) for this thermostat,
+        # found in alexa_media debug logs in a get_entity_state response.
+        # Enables periodic polling of setpoints/mode/hvac action/humidity.
+        vol.Optional(CONF_ALEXA_ENTITY_ID, default=""): str,
     }
 )
 
@@ -78,6 +83,10 @@ class AlexaThermostatBridgeOptionsFlow(config_entries.OptionsFlow):
                 vol.Required(
                     CONF_MAX_TEMP, default=current[CONF_MAX_TEMP]
                 ): vol.Coerce(float),
+                vol.Optional(
+                    CONF_ALEXA_ENTITY_ID,
+                    default=current.get(CONF_ALEXA_ENTITY_ID, ""),
+                ): str,
             }
         )
         return self.async_show_form(step_id="init", data_schema=schema)

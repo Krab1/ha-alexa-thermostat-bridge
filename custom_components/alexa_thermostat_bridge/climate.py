@@ -1,23 +1,50 @@
 from __future__ import annotations
 
+import json
+import logging
+from datetime import timedelta
+
 from homeassistant.components.climate import (
     ATTR_TARGET_TEMP_HIGH,
     ATTR_TARGET_TEMP_LOW,
     ClimateEntity,
     ClimateEntityFeature,
+    HVACAction,
     HVACMode,
 )
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import ATTR_TEMPERATURE, UnitOfTemperature
 from homeassistant.core import Event, HomeAssistant, State, callback
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
-from homeassistant.helpers.event import async_track_state_change_event
+from homeassistant.helpers.event import (
+    async_track_state_change_event,
+    async_track_time_interval,
+)
 from homeassistant.helpers.restore_state import RestoreEntity
 
-from .const import CONF_ECHO_ENTITY, CONF_MAX_TEMP, CONF_MIN_TEMP, CONF_TEMPERATURE_SENSOR
+from .const import (
+    CONF_ALEXA_ENTITY_ID,
+    CONF_ECHO_ENTITY,
+    CONF_MAX_TEMP,
+    CONF_MIN_TEMP,
+    CONF_TEMPERATURE_SENSOR,
+)
 
 # HEAT_COOL, not AUTO, is HA's mode for a user-adjustable heat/cool range.
 MODES = [HVACMode.OFF, HVACMode.HEAT, HVACMode.COOL, HVACMode.HEAT_COOL]
+
+ALEXA_MODE_TO_HVAC = {
+    "OFF": HVACMode.OFF,
+    "HEAT": HVACMode.HEAT,
+    "COOL": HVACMode.COOL,
+    "AUTO": HVACMode.HEAT_COOL,
+}
+
+# alexa_media_player's own coordinator refreshes on a much longer interval;
+# this only needs to catch up occasionally, not chase it.
+POLL_INTERVAL = timedelta(minutes=5)
+
+_LOGGER = logging.getLogger(__name__)
 
 
 async def async_setup_entry(
@@ -45,12 +72,16 @@ class AlexaBridgeClimate(ClimateEntity, RestoreEntity):
         self._echo_entity_id = config[CONF_ECHO_ENTITY]
         self._attr_min_temp = config[CONF_MIN_TEMP]
         self._attr_max_temp = config[CONF_MAX_TEMP]
+        self._alexa_entity_id = config.get(CONF_ALEXA_ENTITY_ID) or None
         self._attr_hvac_mode = HVACMode.OFF
         mid = (self._attr_min_temp + self._attr_max_temp) / 2
         self._attr_target_temperature = mid
         self._attr_target_temperature_low = mid - 2
         self._attr_target_temperature_high = mid + 2
         self._attr_current_temperature = None
+        self._attr_current_humidity = None
+        self._attr_hvac_action = None
+        self._attr_extra_state_attributes = {}
 
     async def async_added_to_hass(self) -> None:
         await super().async_added_to_hass()
@@ -79,6 +110,14 @@ class AlexaBridgeClimate(ClimateEntity, RestoreEntity):
             )
         )
 
+        if self._alexa_entity_id:
+            self.async_on_remove(
+                async_track_time_interval(
+                    self.hass, self._async_poll_alexa_state, POLL_INTERVAL
+                )
+            )
+            await self._async_poll_alexa_state()
+
     @callback
     def _handle_sensor_change(self, event: Event) -> None:
         new_state: State | None = event.data.get("new_state")
@@ -103,6 +142,126 @@ class AlexaBridgeClimate(ClimateEntity, RestoreEntity):
             },
             blocking=True,
         )
+
+    def _get_alexa_login(self):
+        accounts = self.hass.data.get("alexa_media", {}).get("accounts", {})
+        for account in accounts.values():
+            login = account.get("login_obj")
+            if login is not None:
+                return login
+        return None
+
+    @staticmethod
+    def _fahrenheit(payload) -> float | None:
+        if not isinstance(payload, dict) or "value" not in payload:
+            return None
+        value = payload["value"]
+        if payload.get("scale") == "CELSIUS":
+            return value * 9 / 5 + 32
+        return value
+
+    async def _async_poll_alexa_state(self, now=None) -> None:
+        login = self._get_alexa_login()
+        if login is None:
+            _LOGGER.debug(
+                "Alexa Thermostat Bridge: alexa_media login not found, skipping poll"
+            )
+            return
+
+        try:
+            from alexapy import AlexaAPI
+        except ImportError:
+            _LOGGER.warning(
+                "Alexa Thermostat Bridge: alexapy not importable - is"
+                " alexa_media_player installed?"
+            )
+            return
+
+        try:
+            response = await AlexaAPI.get_entity_state(
+                login, entity_ids=[self._alexa_entity_id]
+            )
+        except Exception:  # noqa: BLE001 - third-party API, shape of failures unknown
+            _LOGGER.debug("Alexa Thermostat Bridge: poll failed", exc_info=True)
+            return
+
+        device_states = (response or {}).get("deviceStates", [])
+        capabilities = {}
+        for device_state in device_states:
+            if device_state.get("entity", {}).get("entityId") != self._alexa_entity_id:
+                continue
+            for raw in device_state.get("capabilityStates", []):
+                try:
+                    parsed = json.loads(raw)
+                except (TypeError, ValueError):
+                    continue
+                capabilities[(parsed.get("namespace"), parsed.get("name"))] = parsed.get(
+                    "value"
+                )
+            break
+
+        if not capabilities:
+            return
+
+        mode_raw = capabilities.get(("Alexa.ThermostatController", "thermostatMode"))
+        if mode_raw in ALEXA_MODE_TO_HVAC:
+            self._attr_hvac_mode = ALEXA_MODE_TO_HVAC[mode_raw]
+
+        target = self._fahrenheit(
+            capabilities.get(("Alexa.ThermostatController", "targetSetpoint"))
+        )
+        if target is not None:
+            self._attr_target_temperature = target
+
+        low = self._fahrenheit(
+            capabilities.get(("Alexa.ThermostatController", "lowerSetpoint"))
+        )
+        if low is not None:
+            self._attr_target_temperature_low = low
+
+        high = self._fahrenheit(
+            capabilities.get(("Alexa.ThermostatController", "upperSetpoint"))
+        )
+        if high is not None:
+            self._attr_target_temperature_high = high
+
+        precise_temp = self._fahrenheit(
+            capabilities.get(("Alexa.TemperatureSensor", "preciseTemperature"))
+        )
+        if precise_temp is not None:
+            self._attr_current_temperature = precise_temp
+
+        humidity = capabilities.get(("Alexa.HumiditySensor", "relativeHumidity"))
+        if humidity is not None:
+            self._attr_current_humidity = round(humidity)
+
+        heater_on = capabilities.get(
+            ("Alexa.ThermostatController.HVAC.Components", "primaryHeaterOperation")
+        )
+        cooler_on = capabilities.get(
+            ("Alexa.ThermostatController.HVAC.Components", "coolerOperation")
+        )
+        fan_on = capabilities.get(
+            ("Alexa.ThermostatController.HVAC.Components", "fanOperation")
+        )
+        if self._attr_hvac_mode == HVACMode.OFF:
+            self._attr_hvac_action = HVACAction.OFF
+        elif heater_on == "ON":
+            self._attr_hvac_action = HVACAction.HEATING
+        elif cooler_on == "ON":
+            self._attr_hvac_action = HVACAction.COOLING
+        elif fan_on == "ON":
+            self._attr_hvac_action = HVACAction.FAN
+        else:
+            self._attr_hvac_action = HVACAction.IDLE
+
+        sensor_mode = capabilities.get(
+            ("Alexa.ThermostatController.ExternalTemperatureSensor", "mode")
+        )
+        if sensor_mode is not None:
+            self._attr_extra_state_attributes = {"temperature_source": sensor_mode}
+
+        self.async_write_ha_state()
 
     async def async_set_temperature(self, **kwargs) -> None:
         temperature = kwargs.get(ATTR_TEMPERATURE)
