@@ -350,8 +350,8 @@ class AlexaBridgeClimate(ClimateEntity, RestoreEntity):
         # Alexa needs both endpoints together in one combined command.
         self._schedule_command(
             "range",
-            f"set {self._attr_name} range to"
-            f" {round(self._range_low)} to {round(self._range_high)}",
+            f"set {self._attr_name} range between"
+            f" {round(self._range_low)} and {round(self._range_high)} degrees",
         )
 
     async def async_set_hvac_mode(self, hvac_mode: HVACMode) -> None:
