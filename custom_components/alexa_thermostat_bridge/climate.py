@@ -17,6 +17,7 @@ from homeassistant.const import ATTR_TEMPERATURE, UnitOfTemperature
 from homeassistant.core import Event, HomeAssistant, State, callback
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.event import (
+    async_call_later,
     async_track_state_change_event,
     async_track_time_interval,
 )
@@ -43,6 +44,11 @@ ALEXA_MODE_TO_HVAC = {
 # alexa_media_player's own coordinator refreshes on a much longer interval;
 # this only needs to catch up occasionally, not chase it.
 POLL_INTERVAL = timedelta(minutes=5)
+
+# The round dial fires set_temperature on every drag step, not just on
+# release - without this, each intermediate value became a real spoken
+# Alexa command and they raced each other.
+COMMAND_DEBOUNCE = 2
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -75,14 +81,23 @@ class AlexaBridgeClimate(ClimateEntity, RestoreEntity):
         self._attr_max_temp = config[CONF_MAX_TEMP]
         self._alexa_entity_id = config.get(CONF_ALEXA_ENTITY_ID) or None
         self._attr_hvac_mode = HVACMode.OFF
+
+        # Remembered independently of hvac_mode - only one pair gets
+        # projected onto the entity's actual attrs at a time (see
+        # _sync_target_attrs), but both must survive a mode round-trip.
         mid = (self._attr_min_temp + self._attr_max_temp) / 2
-        self._attr_target_temperature = mid
-        self._attr_target_temperature_low = mid - 2
-        self._attr_target_temperature_high = mid + 2
+        self._single_target = mid
+        self._range_low = mid - 2
+        self._range_high = mid + 2
+
+        self._attr_target_temperature = None
+        self._attr_target_temperature_low = None
+        self._attr_target_temperature_high = None
         self._attr_current_temperature = None
         self._attr_current_humidity = None
         self._attr_hvac_action = None
         self._attr_extra_state_attributes = {}
+        self._pending_commands: dict[str, callback] = {}
         self._sync_target_attrs()
 
     async def async_added_to_hass(self) -> None:
@@ -98,13 +113,13 @@ class AlexaBridgeClimate(ClimateEntity, RestoreEntity):
                 self._attr_hvac_mode = HVACMode.HEAT_COOL
             last_target = last_state.attributes.get(ATTR_TEMPERATURE)
             if last_target is not None:
-                self._attr_target_temperature = last_target
+                self._single_target = last_target
             last_low = last_state.attributes.get(ATTR_TARGET_TEMP_LOW)
             if last_low is not None:
-                self._attr_target_temperature_low = last_low
+                self._range_low = last_low
             last_high = last_state.attributes.get(ATTR_TARGET_TEMP_HIGH)
             if last_high is not None:
-                self._attr_target_temperature_high = last_high
+                self._range_high = last_high
             self._sync_target_attrs()
 
         sensor_state = self.hass.states.get(self._sensor_entity_id)
@@ -134,11 +149,16 @@ class AlexaBridgeClimate(ClimateEntity, RestoreEntity):
 
     def _sync_target_attrs(self) -> None:
         # HA's frontend picks single- vs dual-dial by which of these is
-        # non-None, not by hvac_mode - so only the mode-appropriate one
-        # may be populated or both controls silently collapse to one.
+        # non-None, not by hvac_mode - so only the mode-appropriate pair
+        # may be populated, but the *other* pair's value must be kept
+        # around in _single_target/_range_low/_range_high so switching
+        # back doesn't leave both None (blank read-only ring).
         if self._attr_hvac_mode == HVACMode.HEAT_COOL:
             self._attr_target_temperature = None
+            self._attr_target_temperature_low = self._range_low
+            self._attr_target_temperature_high = self._range_high
         else:
+            self._attr_target_temperature = self._single_target
             self._attr_target_temperature_low = None
             self._attr_target_temperature_high = None
 
@@ -147,6 +167,19 @@ class AlexaBridgeClimate(ClimateEntity, RestoreEntity):
             self._attr_current_temperature = float(state.state)
         except ValueError:
             self._attr_current_temperature = None
+
+    def _schedule_command(self, key: str, text: str) -> None:
+        cancel = self._pending_commands.pop(key, None)
+        if cancel is not None:
+            cancel()
+
+        async def _fire(_now):
+            self._pending_commands.pop(key, None)
+            await self._send_command(text)
+
+        self._pending_commands[key] = async_call_later(
+            self.hass, COMMAND_DEBOUNCE, _fire
+        )
 
     async def _send_command(self, text: str) -> None:
         await self.hass.services.async_call(
@@ -228,19 +261,19 @@ class AlexaBridgeClimate(ClimateEntity, RestoreEntity):
             capabilities.get(("Alexa.ThermostatController", "targetSetpoint"))
         )
         if target is not None:
-            self._attr_target_temperature = target
+            self._single_target = target
 
         low = self._fahrenheit(
             capabilities.get(("Alexa.ThermostatController", "lowerSetpoint"))
         )
         if low is not None:
-            self._attr_target_temperature_low = low
+            self._range_low = low
 
         high = self._fahrenheit(
             capabilities.get(("Alexa.ThermostatController", "upperSetpoint"))
         )
         if high is not None:
-            self._attr_target_temperature_high = high
+            self._range_high = high
 
         precise_temp = self._fahrenheit(
             capabilities.get(("Alexa.TemperatureSensor", "preciseTemperature"))
@@ -284,26 +317,32 @@ class AlexaBridgeClimate(ClimateEntity, RestoreEntity):
     async def async_set_temperature(self, **kwargs) -> None:
         temperature = kwargs.get(ATTR_TEMPERATURE)
         if temperature is not None:
-            self._attr_target_temperature = temperature
+            self._single_target = temperature
+            self._sync_target_attrs()
             self.async_write_ha_state()
-            await self._send_command(
-                f"set {self._attr_name} to {round(temperature)} degrees"
+            self._schedule_command(
+                "single", f"set {self._attr_name} to {round(temperature)} degrees"
             )
             return
 
         low = kwargs.get(ATTR_TARGET_TEMP_LOW)
         high = kwargs.get(ATTR_TARGET_TEMP_HIGH)
         if low is not None:
-            self._attr_target_temperature_low = low
+            self._range_low = low
         if high is not None:
-            self._attr_target_temperature_high = high
+            self._range_high = high
+        self._sync_target_attrs()
         self.async_write_ha_state()
         # Untested phrasing - Alexa's range-setpoint voice grammar isn't
         # documented; adjust these two strings if the thermostat ignores them.
         if low is not None:
-            await self._send_command(f"set {self._attr_name} heat to {round(low)} degrees")
+            self._schedule_command(
+                "low", f"set {self._attr_name} heat to {round(low)} degrees"
+            )
         if high is not None:
-            await self._send_command(f"set {self._attr_name} cool to {round(high)} degrees")
+            self._schedule_command(
+                "high", f"set {self._attr_name} cool to {round(high)} degrees"
+            )
 
     async def async_set_hvac_mode(self, hvac_mode: HVACMode) -> None:
         self._attr_hvac_mode = hvac_mode
