@@ -15,6 +15,9 @@
     },
     "abort": {
       "already_configured": "This sensor/Echo pair is already configured"
+    },
+    "error": {
+      "min_max_invalid": "Minimum temperature must be less than maximum temperature"
     }
   },
   "options": {
@@ -28,6 +31,9 @@
           "alexa_entity_id": "Alexa entity ID (optional, from alexa_media debug logs)"
         }
       }
+    },
+    "error": {
+      "min_max_invalid": "Minimum temperature must be less than maximum temperature"
     }
   },
   "entity": {

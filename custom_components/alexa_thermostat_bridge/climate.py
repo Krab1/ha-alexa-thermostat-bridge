@@ -14,7 +14,7 @@ from homeassistant.components.climate import (
 )
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import ATTR_TEMPERATURE, UnitOfTemperature
-from homeassistant.core import Event, HomeAssistant, State, callback
+from homeassistant.core import CALLBACK_TYPE, Event, HomeAssistant, State, callback
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.event import (
     async_call_later,
@@ -64,6 +64,8 @@ class AlexaBridgeClimate(ClimateEntity, RestoreEntity):
     _attr_supported_features = (
         ClimateEntityFeature.TARGET_TEMPERATURE
         | ClimateEntityFeature.TARGET_TEMPERATURE_RANGE
+        | ClimateEntityFeature.TURN_ON
+        | ClimateEntityFeature.TURN_OFF
     )
     _attr_temperature_unit = UnitOfTemperature.FAHRENHEIT
     _attr_should_poll = False
@@ -97,11 +99,13 @@ class AlexaBridgeClimate(ClimateEntity, RestoreEntity):
         self._attr_current_humidity = None
         self._attr_hvac_action = None
         self._attr_extra_state_attributes = {}
-        self._pending_commands: dict[str, callback] = {}
+        self._pending_commands: dict[str, CALLBACK_TYPE] = {}
         self._sync_target_attrs()
 
     async def async_added_to_hass(self) -> None:
         await super().async_added_to_hass()
+
+        self.async_on_remove(self._cancel_pending_commands)
 
         last_state = await self.async_get_last_state()
         if last_state is not None:
@@ -167,6 +171,15 @@ class AlexaBridgeClimate(ClimateEntity, RestoreEntity):
             self._attr_current_temperature = float(state.state)
         except ValueError:
             self._attr_current_temperature = None
+
+    @callback
+    def _cancel_pending_commands(self) -> None:
+        # Debounced commands scheduled via async_call_later outlive a single
+        # HA update cycle - if the entity is torn down mid-debounce, self.hass
+        # is cleared and the eventual _fire() would crash on _send_command.
+        for cancel in self._pending_commands.values():
+            cancel()
+        self._pending_commands.clear()
 
     def _schedule_command(self, key: str, text: str) -> None:
         cancel = self._pending_commands.pop(key, None)
