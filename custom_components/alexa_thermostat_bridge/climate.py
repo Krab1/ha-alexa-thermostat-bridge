@@ -83,6 +83,7 @@ class AlexaBridgeClimate(ClimateEntity, RestoreEntity):
         self._attr_current_humidity = None
         self._attr_hvac_action = None
         self._attr_extra_state_attributes = {}
+        self._sync_target_attrs()
 
     async def async_added_to_hass(self) -> None:
         await super().async_added_to_hass()
@@ -104,6 +105,7 @@ class AlexaBridgeClimate(ClimateEntity, RestoreEntity):
             last_high = last_state.attributes.get(ATTR_TARGET_TEMP_HIGH)
             if last_high is not None:
                 self._attr_target_temperature_high = last_high
+            self._sync_target_attrs()
 
         sensor_state = self.hass.states.get(self._sensor_entity_id)
         if sensor_state is not None:
@@ -129,6 +131,16 @@ class AlexaBridgeClimate(ClimateEntity, RestoreEntity):
         if new_state is not None:
             self._update_current_temperature(new_state)
             self.async_write_ha_state()
+
+    def _sync_target_attrs(self) -> None:
+        # HA's frontend picks single- vs dual-dial by which of these is
+        # non-None, not by hvac_mode - so only the mode-appropriate one
+        # may be populated or both controls silently collapse to one.
+        if self._attr_hvac_mode == HVACMode.HEAT_COOL:
+            self._attr_target_temperature = None
+        else:
+            self._attr_target_temperature_low = None
+            self._attr_target_temperature_high = None
 
     def _update_current_temperature(self, state: State) -> None:
         try:
@@ -266,6 +278,7 @@ class AlexaBridgeClimate(ClimateEntity, RestoreEntity):
         if sensor_mode is not None:
             self._attr_extra_state_attributes = {"temperature_source": sensor_mode}
 
+        self._sync_target_attrs()
         self.async_write_ha_state()
 
     async def async_set_temperature(self, **kwargs) -> None:
@@ -294,6 +307,7 @@ class AlexaBridgeClimate(ClimateEntity, RestoreEntity):
 
     async def async_set_hvac_mode(self, hvac_mode: HVACMode) -> None:
         self._attr_hvac_mode = hvac_mode
+        self._sync_target_attrs()
         self.async_write_ha_state()
         if hvac_mode == HVACMode.OFF:
             mode_word = "off"
