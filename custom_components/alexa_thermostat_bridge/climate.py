@@ -48,7 +48,7 @@ POLL_INTERVAL = timedelta(minutes=5)
 # The round dial fires set_temperature on every drag step, not just on
 # release - without this, each intermediate value became a real spoken
 # Alexa command and they raced each other.
-COMMAND_DEBOUNCE = 2
+COMMAND_DEBOUNCE = 8
 
 _LOGGER = logging.getLogger(__name__)
 
