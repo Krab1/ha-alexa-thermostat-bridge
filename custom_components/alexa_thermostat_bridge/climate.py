@@ -375,15 +375,28 @@ class AlexaBridgeClimate(ClimateEntity, RestoreEntity):
             mode_word = "auto"
         else:
             mode_word = hvac_mode.value
-        await self._send_command(f"set {self._attr_name} to {mode_word}")
 
-        # The remembered target/range is whatever we last saw or set - it
-        # can be stale if the real setpoint was last changed outside HA.
-        # Mode switching doesn't touch the setpoint itself, so pull the
-        # real value now instead of waiting up to POLL_INTERVAL for it.
-        # update_mode=False: Alexa's backend hasn't necessarily applied our
-        # mode-switch command yet by the time this poll lands, so a mode
-        # read here can still be the *old* mode and would stomp the one we
-        # just set - we already know the mode, only the setpoints are stale.
-        if self._alexa_entity_id and hvac_mode != HVACMode.OFF:
-            await self._async_poll_alexa_state(update_mode=False)
+        # Mark unavailable for the round trip to Alexa (command + the
+        # confirmation poll below) so the card can't be prodded again with
+        # a command already in flight. try/finally is load-bearing here -
+        # if the Alexa call raises or times out, this must still clear or
+        # the entity is stuck "Unavailable" until the next HA restart.
+        self._attr_available = False
+        self.async_write_ha_state()
+        try:
+            await self._send_command(f"set {self._attr_name} to {mode_word}")
+
+            # The remembered target/range is whatever we last saw or set -
+            # it can be stale if the real setpoint was last changed outside
+            # HA. Mode switching doesn't touch the setpoint itself, so pull
+            # the real value now instead of waiting up to POLL_INTERVAL.
+            # update_mode=False: Alexa's backend hasn't necessarily applied
+            # our mode-switch command yet by the time this poll lands, so a
+            # mode read here can still be the *old* mode and would stomp
+            # the one we just set - we already know the mode, only the
+            # setpoints are stale.
+            if self._alexa_entity_id and hvac_mode != HVACMode.OFF:
+                await self._async_poll_alexa_state(update_mode=False)
+        finally:
+            self._attr_available = True
+            self.async_write_ha_state()
