@@ -229,7 +229,7 @@ class AlexaBridgeClimate(ClimateEntity, RestoreEntity):
             return value * 9 / 5 + 32
         return value
 
-    async def _async_poll_alexa_state(self, now=None) -> None:
+    async def _async_poll_alexa_state(self, now=None, update_mode: bool = True) -> None:
         login = self._get_alexa_login()
         if login is None:
             _LOGGER.debug(
@@ -273,7 +273,7 @@ class AlexaBridgeClimate(ClimateEntity, RestoreEntity):
             return
 
         mode_raw = capabilities.get(("Alexa.ThermostatController", "thermostatMode"))
-        if mode_raw in ALEXA_MODE_TO_HVAC:
+        if update_mode and mode_raw in ALEXA_MODE_TO_HVAC:
             self._attr_hvac_mode = ALEXA_MODE_TO_HVAC[mode_raw]
 
         target = self._fahrenheit(
@@ -381,5 +381,9 @@ class AlexaBridgeClimate(ClimateEntity, RestoreEntity):
         # can be stale if the real setpoint was last changed outside HA.
         # Mode switching doesn't touch the setpoint itself, so pull the
         # real value now instead of waiting up to POLL_INTERVAL for it.
+        # update_mode=False: Alexa's backend hasn't necessarily applied our
+        # mode-switch command yet by the time this poll lands, so a mode
+        # read here can still be the *old* mode and would stomp the one we
+        # just set - we already know the mode, only the setpoints are stale.
         if self._alexa_entity_id and hvac_mode != HVACMode.OFF:
-            await self._async_poll_alexa_state()
+            await self._async_poll_alexa_state(update_mode=False)
