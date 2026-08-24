@@ -156,8 +156,14 @@ class AlexaBridgeClimate(ClimateEntity, RestoreEntity):
         # non-None, not by hvac_mode - so only the mode-appropriate pair
         # may be populated, but the *other* pair's value must be kept
         # around in _single_target/_range_low/_range_high so switching
-        # back doesn't leave both None (blank read-only ring).
-        if self._attr_hvac_mode == HVACMode.HEAT_COOL:
+        # back doesn't leave both None (blank read-only ring). In OFF,
+        # both stay None so the dial disappears/greys out - Alexa isn't
+        # going to act on a temperature while the thermostat is off.
+        if self._attr_hvac_mode == HVACMode.OFF:
+            self._attr_target_temperature = None
+            self._attr_target_temperature_low = None
+            self._attr_target_temperature_high = None
+        elif self._attr_hvac_mode == HVACMode.HEAT_COOL:
             self._attr_target_temperature = None
             self._attr_target_temperature_low = self._range_low
             self._attr_target_temperature_high = self._range_high
@@ -328,6 +334,11 @@ class AlexaBridgeClimate(ClimateEntity, RestoreEntity):
         self.async_write_ha_state()
 
     async def async_set_temperature(self, **kwargs) -> None:
+        if self._attr_hvac_mode == HVACMode.OFF:
+            # No dial is shown while off (see _sync_target_attrs), but guard
+            # the service call directly too - Alexa won't act on it either.
+            return
+
         temperature = kwargs.get(ATTR_TEMPERATURE)
         if temperature is not None:
             self._single_target = temperature
@@ -365,3 +376,10 @@ class AlexaBridgeClimate(ClimateEntity, RestoreEntity):
         else:
             mode_word = hvac_mode.value
         await self._send_command(f"set {self._attr_name} to {mode_word}")
+
+        # The remembered target/range is whatever we last saw or set - it
+        # can be stale if the real setpoint was last changed outside HA.
+        # Mode switching doesn't touch the setpoint itself, so pull the
+        # real value now instead of waiting up to POLL_INTERVAL for it.
+        if self._alexa_entity_id and hvac_mode != HVACMode.OFF:
+            await self._async_poll_alexa_state()
