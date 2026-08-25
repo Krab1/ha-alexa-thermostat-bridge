@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from datetime import timedelta
@@ -40,15 +41,23 @@ ALEXA_MODE_TO_HVAC = {
     "COOL": HVACMode.COOL,
     "AUTO": HVACMode.HEAT_COOL,
 }
+HVAC_TO_ALEXA_MODE = {v: k for k, v in ALEXA_MODE_TO_HVAC.items()}
 
 # alexa_media_player's own coordinator refreshes on a much longer interval;
 # this only needs to catch up occasionally, not chase it.
-POLL_INTERVAL = timedelta(minutes=5)
+POLL_INTERVAL = timedelta(minutes=10)
 
 # The round dial fires set_temperature on every drag step, not just on
 # release - without this, each intermediate value became a real spoken
 # Alexa command and they raced each other.
 COMMAND_DEBOUNCE = 8
+
+# After a mode switch, poll every MODE_CONFIRM_RETRY_DELAY seconds until
+# Alexa reports the mode we just set, up to MODE_CONFIRM_MAX_ATTEMPTS times
+# (~20s ceiling) - Alexa's backend doesn't apply the command instantly, so
+# a single immediate poll can still read the old mode back.
+MODE_CONFIRM_RETRY_DELAY = 2.5
+MODE_CONFIRM_MAX_ATTEMPTS = 8
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -229,13 +238,13 @@ class AlexaBridgeClimate(ClimateEntity, RestoreEntity):
             return value * 9 / 5 + 32
         return value
 
-    async def _async_poll_alexa_state(self, now=None, update_mode: bool = True) -> None:
+    async def _fetch_alexa_capabilities(self) -> dict | None:
         login = self._get_alexa_login()
         if login is None:
             _LOGGER.debug(
                 "Alexa Thermostat Bridge: alexa_media login not found, skipping poll"
             )
-            return
+            return None
 
         try:
             from alexapy import AlexaAPI
@@ -244,7 +253,7 @@ class AlexaBridgeClimate(ClimateEntity, RestoreEntity):
                 "Alexa Thermostat Bridge: alexapy not importable - is"
                 " alexa_media_player installed?"
             )
-            return
+            return None
 
         try:
             response = await AlexaAPI.get_entity_state(
@@ -252,7 +261,7 @@ class AlexaBridgeClimate(ClimateEntity, RestoreEntity):
             )
         except Exception:  # noqa: BLE001 - third-party API, shape of failures unknown
             _LOGGER.debug("Alexa Thermostat Bridge: poll failed", exc_info=True)
-            return
+            return None
 
         device_states = (response or {}).get("deviceStates", [])
         capabilities = {}
@@ -269,9 +278,9 @@ class AlexaBridgeClimate(ClimateEntity, RestoreEntity):
                 )
             break
 
-        if not capabilities:
-            return
+        return capabilities or None
 
+    def _apply_capabilities(self, capabilities: dict, update_mode: bool = True) -> None:
         mode_raw = capabilities.get(("Alexa.ThermostatController", "thermostatMode"))
         if update_mode and mode_raw in ALEXA_MODE_TO_HVAC:
             self._attr_hvac_mode = ALEXA_MODE_TO_HVAC[mode_raw]
@@ -331,6 +340,12 @@ class AlexaBridgeClimate(ClimateEntity, RestoreEntity):
             self._attr_extra_state_attributes = {"temperature_source": sensor_mode}
 
         self._sync_target_attrs()
+
+    async def _async_poll_alexa_state(self, now=None, update_mode: bool = True) -> None:
+        capabilities = await self._fetch_alexa_capabilities()
+        if capabilities is None:
+            return
+        self._apply_capabilities(capabilities, update_mode=update_mode)
         self.async_write_ha_state()
 
     async def async_set_temperature(self, **kwargs) -> None:
@@ -376,27 +391,45 @@ class AlexaBridgeClimate(ClimateEntity, RestoreEntity):
         else:
             mode_word = hvac_mode.value
 
-        # Mark unavailable for the round trip to Alexa (command + the
-        # confirmation poll below) so the card can't be prodded again with
-        # a command already in flight. try/finally is load-bearing here -
-        # if the Alexa call raises or times out, this must still clear or
-        # the entity is stuck "Unavailable" until the next HA restart.
+        if not self._alexa_entity_id:
+            # Nothing configured to confirm against - fire and forget, no
+            # artificial wait.
+            await self._send_command(f"set {self._attr_name} to {mode_word}")
+            return
+
+        expected_mode = HVAC_TO_ALEXA_MODE[hvac_mode]
+
+        # Mark unavailable for the whole confirm loop so the card can't be
+        # prodded again with a command already in flight. try/finally is
+        # load-bearing - if Alexa never confirms or a call raises, this
+        # must still clear or the entity is stuck "Unavailable" until the
+        # next HA restart.
         self._attr_available = False
         self.async_write_ha_state()
         try:
             await self._send_command(f"set {self._attr_name} to {mode_word}")
 
-            # The remembered target/range is whatever we last saw or set -
-            # it can be stale if the real setpoint was last changed outside
-            # HA. Mode switching doesn't touch the setpoint itself, so pull
-            # the real value now instead of waiting up to POLL_INTERVAL.
-            # update_mode=False: Alexa's backend hasn't necessarily applied
-            # our mode-switch command yet by the time this poll lands, so a
-            # mode read here can still be the *old* mode and would stomp
-            # the one we just set - we already know the mode, only the
-            # setpoints are stale.
-            if self._alexa_entity_id and hvac_mode != HVACMode.OFF:
-                await self._async_poll_alexa_state(update_mode=False)
+            for _attempt in range(MODE_CONFIRM_MAX_ATTEMPTS):
+                await asyncio.sleep(MODE_CONFIRM_RETRY_DELAY)
+                capabilities = await self._fetch_alexa_capabilities()
+                if capabilities is None:
+                    continue
+                mode_raw = capabilities.get(
+                    ("Alexa.ThermostatController", "thermostatMode")
+                )
+                if mode_raw == expected_mode:
+                    # Confirmed - apply the full state (setpoints/humidity
+                    # too, not just mode) since we're already polling.
+                    self._apply_capabilities(capabilities, update_mode=True)
+                    break
+            else:
+                _LOGGER.warning(
+                    "Alexa Thermostat Bridge: mode change to %s not"
+                    " confirmed after %s attempts - keeping the"
+                    " locally-set mode",
+                    hvac_mode,
+                    MODE_CONFIRM_MAX_ATTEMPTS,
+                )
         finally:
             self._attr_available = True
             self.async_write_ha_state()
