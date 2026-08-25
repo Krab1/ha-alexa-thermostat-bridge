@@ -181,6 +181,33 @@ class AlexaBridgeClimate(ClimateEntity, RestoreEntity):
             self._attr_target_temperature_low = None
             self._attr_target_temperature_high = None
 
+    def _lock_interactions(self) -> None:
+        # Shrinking hvac_modes to just the current mode removes every other
+        # mode option from the selector, and clearing supported_features
+        # drops the temperature dial - between them the card has nothing
+        # left to interact with, but current_temperature/hvac_action still
+        # render normally (unlike _attr_available = False, which blanks
+        # the whole card). Instance attrs shadow the class-level defaults
+        # set on AlexaBridgeClimate, so `del` in _unlock_interactions
+        # cleanly restores them without duplicating the original values.
+        self._attr_icon = "mdi:sync"
+        self._attr_supported_features = ClimateEntityFeature(0)
+        self._attr_hvac_modes = [self._attr_hvac_mode]
+        self._attr_extra_state_attributes = {
+            **self._attr_extra_state_attributes,
+            "status": "updating",
+        }
+
+    def _unlock_interactions(self) -> None:
+        del self._attr_icon
+        del self._attr_supported_features
+        del self._attr_hvac_modes
+        self._attr_extra_state_attributes = {
+            k: v
+            for k, v in self._attr_extra_state_attributes.items()
+            if k != "status"
+        }
+
     def _update_current_temperature(self, state: State) -> None:
         try:
             self._attr_current_temperature = float(state.state)
@@ -399,12 +426,14 @@ class AlexaBridgeClimate(ClimateEntity, RestoreEntity):
 
         expected_mode = HVAC_TO_ALEXA_MODE[hvac_mode]
 
-        # Mark unavailable for the whole confirm loop so the card can't be
-        # prodded again with a command already in flight. try/finally is
-        # load-bearing - if Alexa never confirms or a call raises, this
-        # must still clear or the entity is stuck "Unavailable" until the
-        # next HA restart.
-        self._attr_available = False
+        # Lock the card for the confirm loop rather than going fully
+        # "Unavailable" - the current temperature/mode stay visible, but
+        # supported_features/hvac_modes shrink to nothing-selectable so it
+        # can't be prodded again with a command already in flight. try/
+        # finally is load-bearing - if Alexa never confirms or a call
+        # raises, this must still restore both or the card is stuck locked
+        # until the next HA restart.
+        self._lock_interactions()
         self.async_write_ha_state()
         try:
             await self._send_command(f"set {self._attr_name} to {mode_word}")
@@ -431,5 +460,5 @@ class AlexaBridgeClimate(ClimateEntity, RestoreEntity):
                     MODE_CONFIRM_MAX_ATTEMPTS,
                 )
         finally:
-            self._attr_available = True
+            self._unlock_interactions()
             self.async_write_ha_state()

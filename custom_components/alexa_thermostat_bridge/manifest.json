@@ -1,7 +1,7 @@
 {
   "domain": "alexa_thermostat_bridge",
   "name": "Alexa Thermostat Bridge",
-  "version": "1.8.0",
+  "version": "1.9.0",
   "config_flow": true,
   "codeowners": [],
   "requirements": [],
