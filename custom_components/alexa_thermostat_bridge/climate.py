@@ -50,7 +50,7 @@ POLL_INTERVAL = timedelta(minutes=10)
 # The round dial fires set_temperature on every drag step, not just on
 # release - without this, each intermediate value became a real spoken
 # Alexa command and they raced each other.
-COMMAND_DEBOUNCE = 8
+COMMAND_DEBOUNCE = 4
 
 # After a mode switch, poll every MODE_CONFIRM_RETRY_DELAY seconds until
 # Alexa reports the mode we just set, up to MODE_CONFIRM_MAX_ATTEMPTS times
@@ -109,6 +109,12 @@ class AlexaBridgeClimate(ClimateEntity, RestoreEntity):
         self._attr_hvac_action = None
         self._attr_extra_state_attributes = {}
         self._pending_commands: dict[str, CALLBACK_TYPE] = {}
+        # Shrinking hvac_modes during a switch (see _lock_interactions)
+        # only stops the *card* from offering other modes - it doesn't
+        # stop a second async_set_hvac_mode call that's already in flight
+        # (e.g. a click that landed before the locked state reached the
+        # frontend). This actually rejects overlapping calls.
+        self._mode_change_lock = asyncio.Lock()
         self._sync_target_attrs()
 
     async def async_added_to_hass(self) -> None:
@@ -408,6 +414,17 @@ class AlexaBridgeClimate(ClimateEntity, RestoreEntity):
         )
 
     async def async_set_hvac_mode(self, hvac_mode: HVACMode) -> None:
+        if self._mode_change_lock.locked():
+            _LOGGER.debug(
+                "Alexa Thermostat Bridge: mode change already in progress,"
+                " ignoring request for %s",
+                hvac_mode,
+            )
+            return
+        async with self._mode_change_lock:
+            await self._async_set_hvac_mode(hvac_mode)
+
+    async def _async_set_hvac_mode(self, hvac_mode: HVACMode) -> None:
         self._attr_hvac_mode = hvac_mode
         self._sync_target_attrs()
         self.async_write_ha_state()
