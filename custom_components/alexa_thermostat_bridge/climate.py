@@ -3,7 +3,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from datetime import timedelta
+from datetime import datetime, timedelta
+from typing import Any
 
 from homeassistant.components.climate import (
     ATTR_TARGET_TEMP_HIGH,
@@ -214,6 +215,16 @@ class AlexaBridgeClimate(ClimateEntity, RestoreEntity):
             if k != "status"
         }
 
+    def _local_sensor_temperature(self) -> float | None:
+        state = self.hass.states.get(self._sensor_entity_id)
+        if state is None:
+            return None
+        try:
+            return float(state.state)
+        except ValueError:
+            # "unknown"/"unavailable" land here - treated as no reading.
+            return None
+
     def _update_current_temperature(self, state: State) -> None:
         try:
             self._attr_current_temperature = float(state.state)
@@ -254,7 +265,7 @@ class AlexaBridgeClimate(ClimateEntity, RestoreEntity):
             blocking=True,
         )
 
-    def _get_alexa_login(self):
+    def _get_alexa_login(self) -> Any | None:
         accounts = self.hass.data.get("alexa_media", {}).get("accounts", {})
         for account in accounts.values():
             login = account.get("login_obj")
@@ -271,7 +282,7 @@ class AlexaBridgeClimate(ClimateEntity, RestoreEntity):
             return value * 9 / 5 + 32
         return value
 
-    async def _fetch_alexa_capabilities(self) -> dict | None:
+    async def _fetch_alexa_capabilities(self) -> dict[tuple[str, str], Any] | None:
         login = self._get_alexa_login()
         if login is None:
             _LOGGER.debug(
@@ -313,7 +324,9 @@ class AlexaBridgeClimate(ClimateEntity, RestoreEntity):
 
         return capabilities or None
 
-    def _apply_capabilities(self, capabilities: dict, update_mode: bool = True) -> None:
+    def _apply_capabilities(
+        self, capabilities: dict[tuple[str, str], Any], update_mode: bool = True
+    ) -> None:
         mode_raw = capabilities.get(("Alexa.ThermostatController", "thermostatMode"))
         if update_mode and mode_raw in ALEXA_MODE_TO_HVAC:
             self._attr_hvac_mode = ALEXA_MODE_TO_HVAC[mode_raw]
@@ -336,10 +349,17 @@ class AlexaBridgeClimate(ClimateEntity, RestoreEntity):
         if high is not None:
             self._range_high = high
 
+        # The configured sensor wins: it's pushed on every change, while this
+        # poll only runs every POLL_INTERVAL, so taking Alexa's copy
+        # unconditionally would replace a fresh reading with a stale one.
+        # Only fall back to Alexa's when that sensor has no usable value.
         precise_temp = self._fahrenheit(
             capabilities.get(("Alexa.TemperatureSensor", "preciseTemperature"))
         )
-        if precise_temp is not None:
+        local_temp = self._local_sensor_temperature()
+        if local_temp is not None:
+            self._attr_current_temperature = local_temp
+        elif precise_temp is not None:
             self._attr_current_temperature = precise_temp
 
         humidity = capabilities.get(("Alexa.HumiditySensor", "relativeHumidity"))
@@ -370,11 +390,25 @@ class AlexaBridgeClimate(ClimateEntity, RestoreEntity):
             ("Alexa.ThermostatController.ExternalTemperatureSensor", "mode")
         )
         if sensor_mode is not None:
-            self._attr_extra_state_attributes = {"temperature_source": sensor_mode}
+            # Merge, don't replace - this runs during the mode-confirm loop
+            # too, and a wholesale reassign would drop the "status" key that
+            # _lock_interactions set.
+            self._attr_extra_state_attributes = {
+                **self._attr_extra_state_attributes,
+                "temperature_source": sensor_mode,
+            }
 
         self._sync_target_attrs()
 
-    async def _async_poll_alexa_state(self, now=None, update_mode: bool = True) -> None:
+    async def _async_poll_alexa_state(
+        self, now: datetime | None = None, update_mode: bool = True
+    ) -> None:
+        if self._mode_change_lock.locked():
+            # A mode switch is mid-confirm. Alexa may not have applied it
+            # yet, so this poll's mode would be the pre-change one and would
+            # stomp the mode we're actively waiting on - the confirm loop is
+            # already polling, let it own the state until it's done.
+            return
         capabilities = await self._fetch_alexa_capabilities()
         if capabilities is None:
             return
@@ -425,6 +459,7 @@ class AlexaBridgeClimate(ClimateEntity, RestoreEntity):
             await self._async_set_hvac_mode(hvac_mode)
 
     async def _async_set_hvac_mode(self, hvac_mode: HVACMode) -> None:
+        previous_mode = self._attr_hvac_mode
         self._attr_hvac_mode = hvac_mode
         self._sync_target_attrs()
         self.async_write_ha_state()
@@ -438,7 +473,15 @@ class AlexaBridgeClimate(ClimateEntity, RestoreEntity):
         if not self._alexa_entity_id:
             # Nothing configured to confirm against - fire and forget, no
             # artificial wait.
-            await self._send_command(f"set {self._attr_name} to {mode_word}")
+            try:
+                await self._send_command(f"set {self._attr_name} to {mode_word}")
+            except Exception:
+                # The optimistic mode above was never actually sent - don't
+                # leave the card claiming a mode the thermostat never got.
+                self._attr_hvac_mode = previous_mode
+                self._sync_target_attrs()
+                self.async_write_ha_state()
+                raise
             return
 
         expected_mode = HVAC_TO_ALEXA_MODE[hvac_mode]
@@ -453,29 +496,58 @@ class AlexaBridgeClimate(ClimateEntity, RestoreEntity):
         self._lock_interactions()
         self.async_write_ha_state()
         try:
-            await self._send_command(f"set {self._attr_name} to {mode_word}")
+            try:
+                await self._send_command(f"set {self._attr_name} to {mode_word}")
+            except Exception:
+                self._attr_hvac_mode = previous_mode
+                self._sync_target_attrs()
+                raise
 
+            last_seen_mode = None
             for _attempt in range(MODE_CONFIRM_MAX_ATTEMPTS):
                 await asyncio.sleep(MODE_CONFIRM_RETRY_DELAY)
                 capabilities = await self._fetch_alexa_capabilities()
                 if capabilities is None:
                     continue
-                mode_raw = capabilities.get(
+                last_seen_mode = capabilities.get(
                     ("Alexa.ThermostatController", "thermostatMode")
                 )
-                if mode_raw == expected_mode:
-                    # Confirmed - apply the full state (setpoints/humidity
-                    # too, not just mode) since we're already polling.
-                    self._apply_capabilities(capabilities, update_mode=True)
+                # Take the setpoints/humidity/action from every attempt, not
+                # just the matching one - if the user changed something in
+                # the Alexa app while we were waiting, that data is real and
+                # discarding it would leave HA stale until the next poll.
+                # update_mode stays False here: until Alexa reports our
+                # requested mode it's still reporting the pre-change one,
+                # which would stomp the mode we're waiting on.
+                self._apply_capabilities(capabilities, update_mode=False)
+                if last_seen_mode == expected_mode:
                     break
             else:
-                _LOGGER.warning(
-                    "Alexa Thermostat Bridge: mode change to %s not"
-                    " confirmed after %s attempts - keeping the"
-                    " locally-set mode",
-                    hvac_mode,
-                    MODE_CONFIRM_MAX_ATTEMPTS,
-                )
+                # Never confirmed. If Alexa is consistently reporting some
+                # other mode, it's telling us the switch didn't take (the
+                # user may have changed it themselves mid-flight) - believe
+                # Alexa over our optimistic value rather than displaying a
+                # mode the thermostat never had.
+                actual_mode = ALEXA_MODE_TO_HVAC.get(last_seen_mode)
+                if actual_mode is not None and actual_mode != hvac_mode:
+                    _LOGGER.warning(
+                        "Alexa Thermostat Bridge: mode change to %s not"
+                        " confirmed after %s attempts - Alexa reports %s,"
+                        " using that",
+                        hvac_mode,
+                        MODE_CONFIRM_MAX_ATTEMPTS,
+                        actual_mode,
+                    )
+                    self._attr_hvac_mode = actual_mode
+                    self._sync_target_attrs()
+                else:
+                    _LOGGER.warning(
+                        "Alexa Thermostat Bridge: mode change to %s not"
+                        " confirmed after %s attempts (no usable mode read"
+                        " back) - keeping the locally-set mode",
+                        hvac_mode,
+                        MODE_CONFIRM_MAX_ATTEMPTS,
+                    )
         finally:
             self._unlock_interactions()
             self.async_write_ha_state()
