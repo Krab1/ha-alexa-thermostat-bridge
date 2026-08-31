@@ -44,19 +44,17 @@ ALEXA_MODE_TO_HVAC = {
 }
 HVAC_TO_ALEXA_MODE = {v: k for k, v in ALEXA_MODE_TO_HVAC.items()}
 
-# alexa_media_player's own coordinator refreshes on a much longer interval;
-# this only needs to catch up occasionally, not chase it.
-POLL_INTERVAL = timedelta(minutes=10)
+# This is the only reliable way to notice a change made in the Alexa app or
+# by voice - there's no push from Alexa, and the sensor-triggered poll below
+# only fires when the temperature reading itself moves, which it often
+# doesn't for many minutes at a time. So this interval is what actually
+# bounds "how stale can HA be", hence the fairly tight value.
+POLL_INTERVAL = timedelta(seconds=60)
 
 # The round dial fires set_temperature on every drag step, not just on
 # release - without this, each intermediate value became a real spoken
 # Alexa command and they raced each other.
 COMMAND_DEBOUNCE = 4
-
-# Floor between two sensor-triggered ("piggyback") polls. The timer above
-# is the backstop; this is what actually picks up changes made in the Alexa
-# app, at whatever cadence alexa_media_player refreshes its sensor.
-PIGGYBACK_POLL_MIN_INTERVAL = 60
 
 # After a mode switch, poll every MODE_CONFIRM_RETRY_DELAY seconds until
 # Alexa reports the mode we just set, up to MODE_CONFIRM_MAX_ATTEMPTS times
@@ -121,10 +119,6 @@ class AlexaBridgeClimate(ClimateEntity, RestoreEntity):
         # (e.g. a click that landed before the locked state reached the
         # frontend). This actually rejects overlapping calls.
         self._mode_change_lock = asyncio.Lock()
-        # Monotonic (hass.loop.time) timestamp of the last sensor-triggered
-        # poll; -inf so the first one is never throttled.
-        self._last_piggyback_poll = float("-inf")
-        self._piggyback_task: asyncio.Task | None = None
         self._sync_target_attrs()
 
     async def async_added_to_hass(self) -> None:
@@ -172,26 +166,9 @@ class AlexaBridgeClimate(ClimateEntity, RestoreEntity):
     @callback
     def _handle_sensor_change(self, event: Event) -> None:
         new_state: State | None = event.data.get("new_state")
-        if new_state is None:
-            return
-        self._update_current_temperature(new_state)
-        self.async_write_ha_state()
-
-        # alexa_media_player refreshes this sensor on its own schedule, which
-        # means a state change here is a free signal that it just talked to
-        # Alexa - a good moment to re-read mode/setpoints rather than waiting
-        # out the POLL_INTERVAL timer. Throttled so a chatty sensor can't turn
-        # into a poll per update, and skipped mid-mode-change for the same
-        # reason _async_poll_alexa_state bails there.
-        if not self._alexa_entity_id or self._mode_change_lock.locked():
-            return
-        now = self.hass.loop.time()
-        if now - self._last_piggyback_poll < PIGGYBACK_POLL_MIN_INTERVAL:
-            return
-        self._last_piggyback_poll = now
-        self._piggyback_task = self.hass.async_create_task(
-            self._async_poll_alexa_state()
-        )
+        if new_state is not None:
+            self._update_current_temperature(new_state)
+            self.async_write_ha_state()
 
     def _sync_target_attrs(self) -> None:
         # HA's frontend picks single- vs dual-dial by which of these is
@@ -265,12 +242,6 @@ class AlexaBridgeClimate(ClimateEntity, RestoreEntity):
         for cancel in self._pending_commands.values():
             cancel()
         self._pending_commands.clear()
-        # Same reasoning for the sensor-triggered poll: it can still be
-        # awaiting Alexa when the entity goes away, and would then write
-        # state against a torn-down entity.
-        if self._piggyback_task is not None and not self._piggyback_task.done():
-            self._piggyback_task.cancel()
-        self._piggyback_task = None
 
     def _schedule_command(self, key: str, text: str) -> None:
         cancel = self._pending_commands.pop(key, None)
