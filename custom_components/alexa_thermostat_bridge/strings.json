@@ -9,7 +9,8 @@
           "echo_entity": "Echo to relay commands through",
           "min_temp": "Minimum temperature",
           "max_temp": "Maximum temperature",
-          "alexa_entity_id": "Alexa entity ID (optional, from alexa_media debug logs)"
+          "alexa_entity_id": "Alexa entity ID (optional, from alexa_media debug logs)",
+          "poll_interval": "Poll interval (seconds) - how often to read state back from Alexa"
         }
       }
     },
@@ -28,7 +29,8 @@
           "echo_entity": "Echo to relay commands through",
           "min_temp": "Minimum temperature",
           "max_temp": "Maximum temperature",
-          "alexa_entity_id": "Alexa entity ID (optional, from alexa_media debug logs)"
+          "alexa_entity_id": "Alexa entity ID (optional, from alexa_media debug logs)",
+          "poll_interval": "Poll interval (seconds) - how often to read state back from Alexa"
         }
       }
     },

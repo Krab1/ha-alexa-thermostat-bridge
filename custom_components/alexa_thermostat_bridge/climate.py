@@ -30,7 +30,11 @@ from .const import (
     CONF_ECHO_ENTITY,
     CONF_MAX_TEMP,
     CONF_MIN_TEMP,
+    CONF_POLL_INTERVAL,
     CONF_TEMPERATURE_SENSOR,
+    DEFAULT_POLL_INTERVAL,
+    MAX_POLL_INTERVAL,
+    MIN_POLL_INTERVAL,
 )
 
 # HEAT_COOL, not AUTO, is HA's mode for a user-adjustable heat/cool range.
@@ -44,12 +48,10 @@ ALEXA_MODE_TO_HVAC = {
 }
 HVAC_TO_ALEXA_MODE = {v: k for k, v in ALEXA_MODE_TO_HVAC.items()}
 
-# This is the only reliable way to notice a change made in the Alexa app or
-# by voice - there's no push from Alexa, and the sensor-triggered poll below
-# only fires when the temperature reading itself moves, which it often
-# doesn't for many minutes at a time. So this interval is what actually
-# bounds "how stale can HA be", hence the fairly tight value.
-POLL_INTERVAL = timedelta(seconds=60)
+# Polling is the only way to notice a change made in the Alexa app or by
+# voice - there's no push from Alexa - so the configured interval is what
+# actually bounds "how stale can HA be". Set per config entry; see
+# DEFAULT_POLL_INTERVAL in const.py.
 
 # The round dial fires set_temperature on every drag step, not just on
 # release - without this, each intermediate value became a real spoken
@@ -95,6 +97,17 @@ class AlexaBridgeClimate(ClimateEntity, RestoreEntity):
         self._attr_min_temp = config[CONF_MIN_TEMP]
         self._attr_max_temp = config[CONF_MAX_TEMP]
         self._alexa_entity_id = config.get(CONF_ALEXA_ENTITY_ID) or None
+        # Clamped rather than trusted: the number selector bounds the UI, but
+        # an entry hand-edited in .storage would otherwise be able to set a
+        # 1-second interval and hammer Alexa's API.
+        poll_seconds = config.get(CONF_POLL_INTERVAL, DEFAULT_POLL_INTERVAL)
+        try:
+            poll_seconds = int(poll_seconds)
+        except (TypeError, ValueError):
+            poll_seconds = DEFAULT_POLL_INTERVAL
+        self._poll_interval = timedelta(
+            seconds=min(max(poll_seconds, MIN_POLL_INTERVAL), MAX_POLL_INTERVAL)
+        )
         self._attr_hvac_mode = HVACMode.OFF
 
         # Remembered independently of hvac_mode - only one pair gets
@@ -158,7 +171,7 @@ class AlexaBridgeClimate(ClimateEntity, RestoreEntity):
         if self._alexa_entity_id:
             self.async_on_remove(
                 async_track_time_interval(
-                    self.hass, self._async_poll_alexa_state, POLL_INTERVAL
+                    self.hass, self._async_poll_alexa_state, self._poll_interval
                 )
             )
             await self._async_poll_alexa_state()

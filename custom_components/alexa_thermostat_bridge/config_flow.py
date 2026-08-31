@@ -11,10 +11,26 @@ from .const import (
     CONF_ECHO_ENTITY,
     CONF_MAX_TEMP,
     CONF_MIN_TEMP,
+    CONF_POLL_INTERVAL,
     CONF_TEMPERATURE_SENSOR,
     DEFAULT_MAX_TEMP,
     DEFAULT_MIN_TEMP,
+    DEFAULT_POLL_INTERVAL,
     DOMAIN,
+    MAX_POLL_INTERVAL,
+    MIN_POLL_INTERVAL,
+)
+
+POLL_INTERVAL_SELECTOR = selector.selector(
+    {
+        "number": {
+            "min": MIN_POLL_INTERVAL,
+            "max": MAX_POLL_INTERVAL,
+            "step": 5,
+            "unit_of_measurement": "seconds",
+            "mode": "box",
+        }
+    }
 )
 
 
@@ -48,6 +64,10 @@ def _user_schema(defaults: dict) -> vol.Schema:
             vol.Optional(
                 CONF_ALEXA_ENTITY_ID, default=defaults.get(CONF_ALEXA_ENTITY_ID, "")
             ): str,
+            vol.Required(
+                CONF_POLL_INTERVAL,
+                default=defaults.get(CONF_POLL_INTERVAL, DEFAULT_POLL_INTERVAL),
+            ): POLL_INTERVAL_SELECTOR,
         }
     )
 
@@ -110,6 +130,10 @@ class AlexaThermostatBridgeOptionsFlow(config_entries.OptionsFlow):
                     CONF_ALEXA_ENTITY_ID,
                     default=current.get(CONF_ALEXA_ENTITY_ID, ""),
                 ): str,
+                vol.Required(
+                    CONF_POLL_INTERVAL,
+                    default=current.get(CONF_POLL_INTERVAL, DEFAULT_POLL_INTERVAL),
+                ): POLL_INTERVAL_SELECTOR,
             }
         )
         return self.async_show_form(

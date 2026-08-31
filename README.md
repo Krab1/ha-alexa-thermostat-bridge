@@ -6,7 +6,7 @@ Home Assistant custom integration that wraps an Amazon Smart Thermostat as a rea
 
 Amazon's thermostat has no local API and isn't supported by any HA-native integration. This bridges it by:
 
-- **Reading** current temperature/humidity/mode/setpoints by polling Alexa's device-state API every 5 minutes, reusing the authenticated session from [alexa_media_player](https://github.com/alandtse/alexa_media_player) (HACS) — falls back to a plain temperature `sensor` if no Alexa entity ID is configured.
+- **Reading** current temperature/humidity/mode/setpoints by polling Alexa's device-state API (every 60s by default, configurable), reusing the authenticated session from [alexa_media_player](https://github.com/alandtse/alexa_media_player) (HACS) — falls back to a plain temperature `sensor` if no Alexa entity ID is configured.
 - **Writing** by relaying commands to an Echo via `media_player.play_media` (`media_content_type: custom`), the same mechanism as typing a command in the Alexa app — Alexa's own voice NLU routes it to the thermostat, so there's no private API to reverse-engineer. Dial-drag commands are debounced 8s before sending.
 
 Target temperature, range, and HVAC mode persist across HA restarts via `RestoreEntity`. No YAML, no MQTT, no helper entities — setup is entirely through the UI.
@@ -33,10 +33,21 @@ Settings → Devices & Services → Add Integration → **Alexa Thermostat Bridg
 - Temperature sensor (the `sensor.*` entity alexa_media_player created for the thermostat)
 - Echo entity to relay commands through
 - Min/max temperature
+- Alexa entity ID (optional, but needed for any readback — see below)
+- Poll interval, default 60s (15–3600)
 
-A `climate` entity appears immediately — add a **Thermostat** card for it.
+A `climate` entity appears immediately — add a **Thermostat** card for it. All
+of the above can be changed later via **Configure** on the integration.
+
+### Poll interval
+
+Alexa doesn't push state changes, so polling is the only way HA notices a
+change you made in the Alexa app or by voice — the interval is effectively
+"how stale can HA be". 60s is a good default; raise it if you'd rather Alexa's
+API be hit less often, at the cost of slower pickup of external changes.
 
 ## Known limitations
 
-- Commands are fire-and-forget on send; confirmation only arrives on the next poll cycle (up to 5 minutes later) unless an Alexa entity ID is configured for polling.
-- Without an Alexa entity ID configured, there's no readback of mode/setpoints/humidity at all — only the plain temperature sensor.
+- Setpoint changes are fire-and-forget on send; if Alexa rejects one, HA keeps showing the requested value until the next poll corrects it. Mode changes are confirmed explicitly (HA polls until Alexa reports the new mode, then unlocks the card).
+- Without an Alexa entity ID configured, there's no readback of mode/setpoints/humidity at all — only the plain temperature sensor, and changes made in the Alexa app never reach HA.
+- Changing a setpoint in the Alexa app during HA's few-second send delay will be overwritten by HA's pending value — last local edit wins.
