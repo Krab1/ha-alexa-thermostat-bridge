@@ -18,7 +18,7 @@
       "already_configured": "This sensor/Echo pair is already configured"
     },
     "error": {
-      "min_max_invalid": "Minimum temperature must be less than maximum temperature"
+      "min_max_invalid": "Maximum temperature must be at least 3 degrees above minimum"
     }
   },
   "options": {
@@ -35,7 +35,7 @@
       }
     },
     "error": {
-      "min_max_invalid": "Minimum temperature must be less than maximum temperature"
+      "min_max_invalid": "Maximum temperature must be at least 3 degrees above minimum"
     }
   },
   "entity": {

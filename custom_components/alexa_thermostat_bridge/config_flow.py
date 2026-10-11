@@ -19,6 +19,7 @@ from .const import (
     DOMAIN,
     MAX_POLL_INTERVAL,
     MIN_POLL_INTERVAL,
+    MIN_RANGE_GAP,
 )
 
 POLL_INTERVAL_SELECTOR = selector.selector(
@@ -35,7 +36,7 @@ POLL_INTERVAL_SELECTOR = selector.selector(
 
 
 def _min_max_errors(user_input: dict) -> dict:
-    if user_input[CONF_MIN_TEMP] >= user_input[CONF_MAX_TEMP]:
+    if user_input[CONF_MAX_TEMP] - user_input[CONF_MIN_TEMP] < MIN_RANGE_GAP:
         return {CONF_MIN_TEMP: "min_max_invalid"}
     return {}
 

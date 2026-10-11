@@ -36,6 +36,7 @@ from .const import (
     MAX_POLL_INTERVAL,
     MIN_POLL_INTERVAL,
 )
+from .range_gap import enforce_gap
 
 # HEAT_COOL, not AUTO, is HA's mode for a user-adjustable heat/cool range.
 MODES = [HVACMode.OFF, HVACMode.HEAT, HVACMode.COOL, HVACMode.HEAT_COOL]
@@ -357,13 +358,13 @@ class AlexaBridgeClimate(ClimateEntity, RestoreEntity):
             capabilities.get(("Alexa.ThermostatController", "lowerSetpoint"))
         )
         if low is not None:
-            self._range_low = low
+            self._range_low = round(low)
 
         high = self._fahrenheit(
             capabilities.get(("Alexa.ThermostatController", "upperSetpoint"))
         )
         if high is not None:
-            self._range_high = high
+            self._range_high = round(high)
 
         # The configured sensor wins: it's pushed on every change, while this
         # poll only runs every POLL_INTERVAL, so taking Alexa's copy
@@ -449,10 +450,22 @@ class AlexaBridgeClimate(ClimateEntity, RestoreEntity):
 
         low = kwargs.get(ATTR_TARGET_TEMP_LOW)
         high = kwargs.get(ATTR_TARGET_TEMP_HIGH)
+        # The dial sends both ends every time, so whichever differs from the
+        # stored value is the one the user moved; the other gets pushed.
+        moved_low = low is not None and round(low) != self._range_low
+        moved_high = high is not None and round(high) != self._range_high
         if low is not None:
-            self._range_low = low
+            self._range_low = round(low)
         if high is not None:
-            self._range_high = high
+            self._range_high = round(high)
+        self._range_low, self._range_high = enforce_gap(
+            self._range_low,
+            self._range_high,
+            moved_high,
+            moved_low,
+            self._attr_min_temp,
+            self._attr_max_temp,
+        )
         self._sync_target_attrs()
         self.async_write_ha_state()
         # Always resend the full range, even if only one handle moved -

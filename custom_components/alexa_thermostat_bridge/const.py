@@ -16,3 +16,6 @@ DEFAULT_MAX_TEMP = 85
 DEFAULT_POLL_INTERVAL = 60
 MIN_POLL_INTERVAL = 15
 MAX_POLL_INTERVAL = 3600
+
+# Alexa ignores an Auto range tighter than this (degrees F).
+MIN_RANGE_GAP = 3
