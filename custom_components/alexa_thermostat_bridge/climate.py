@@ -127,6 +127,10 @@ class AlexaBridgeClimate(ClimateEntity, RestoreEntity):
         self._attr_hvac_action = None
         self._attr_extra_state_attributes = {}
         self._pending_commands: dict[str, CALLBACK_TYPE] = {}
+        # Last setpoints Alexa is known to hold (from a poll or a send we made).
+        # Lets us skip a command when the user drags away and back to the same
+        # values. Empty = unknown, so always send.
+        self._alexa: dict[str, float] = {}
         # Shrinking hvac_modes during a switch (see _lock_interactions)
         # only stops the *card* from offering other modes - it doesn't
         # stop a second async_set_hvac_mode call that's already in flight
@@ -257,14 +261,20 @@ class AlexaBridgeClimate(ClimateEntity, RestoreEntity):
             cancel()
         self._pending_commands.clear()
 
-    def _schedule_command(self, key: str, text: str) -> None:
+    def _cancel_command(self, key: str) -> None:
         cancel = self._pending_commands.pop(key, None)
         if cancel is not None:
             cancel()
 
+    def _schedule_command(
+        self, key: str, text: str, synced: dict[str, float]
+    ) -> None:
+        self._cancel_command(key)
+
         async def _fire(_now):
             self._pending_commands.pop(key, None)
             await self._send_command(text)
+            self._alexa.update(synced)
 
         self._pending_commands[key] = async_call_later(
             self.hass, COMMAND_DEBOUNCE, _fire
@@ -353,18 +363,21 @@ class AlexaBridgeClimate(ClimateEntity, RestoreEntity):
         )
         if target is not None:
             self._single_target = target
+            self._alexa["single"] = round(target)
 
         low = self._fahrenheit(
             capabilities.get(("Alexa.ThermostatController", "lowerSetpoint"))
         )
         if low is not None:
             self._range_low = round(low)
+            self._alexa["low"] = self._range_low
 
         high = self._fahrenheit(
             capabilities.get(("Alexa.ThermostatController", "upperSetpoint"))
         )
         if high is not None:
             self._range_high = round(high)
+            self._alexa["high"] = self._range_high
 
         # The configured sensor wins: it's pushed on every change, while this
         # poll only runs every POLL_INTERVAL, so taking Alexa's copy
@@ -443,8 +456,13 @@ class AlexaBridgeClimate(ClimateEntity, RestoreEntity):
             self._single_target = temperature
             self._sync_target_attrs()
             self.async_write_ha_state()
+            if round(temperature) == self._alexa.get("single"):
+                self._cancel_command("single")  # back to what Alexa already has
+                return
             self._schedule_command(
-                "single", f"set {self._attr_name} to {round(temperature)} degrees"
+                "single",
+                f"set {self._attr_name} to {round(temperature)} degrees",
+                {"single": round(temperature)},
             )
             return
 
@@ -470,10 +488,17 @@ class AlexaBridgeClimate(ClimateEntity, RestoreEntity):
         self.async_write_ha_state()
         # Always resend the full range, even if only one handle moved -
         # Alexa needs both endpoints together in one combined command.
+        if (self._range_low, self._range_high) == (
+            self._alexa.get("low"),
+            self._alexa.get("high"),
+        ):
+            self._cancel_command("range")  # back to what Alexa already has
+            return
         self._schedule_command(
             "range",
             f"set {self._attr_name} range between"
             f" {round(self._range_low)} and {round(self._range_high)} degrees",
+            {"low": self._range_low, "high": self._range_high},
         )
 
     async def async_set_hvac_mode(self, hvac_mode: HVACMode) -> None:
@@ -490,6 +515,7 @@ class AlexaBridgeClimate(ClimateEntity, RestoreEntity):
     async def _async_set_hvac_mode(self, hvac_mode: HVACMode) -> None:
         previous_mode = self._attr_hvac_mode
         self._attr_hvac_mode = hvac_mode
+        self._alexa.clear()  # setpoints may differ per mode; re-learn on poll
         self._sync_target_attrs()
         self.async_write_ha_state()
         if hvac_mode == HVACMode.OFF:
