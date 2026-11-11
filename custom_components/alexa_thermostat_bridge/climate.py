@@ -310,22 +310,22 @@ class AlexaBridgeClimate(ClimateEntity, RestoreEntity):
             blocking=True,
         )
 
-    async def _send_range(self, low: int, high: int) -> None:
-        if await self._set_range_direct(low, high):
+    async def _send(self, parameters: dict[str, Any], text: str) -> None:
+        if await self._control_direct(parameters):
             return
-        await self._send_command(
-            f"set {self._attr_name} range between {low} and {high} degrees"
-        )
+        await self._send_command(text)
 
-    async def _set_range_direct(self, low: int, high: int) -> bool:
-        # Since Nov 2026 Alexa answers the spoken-text range command with
-        # "I'm not quite sure what went wrong" (single setpoint and mode text
-        # commands still work, and the same words work by voice). So set the
-        # range on the smart-home API directly - same endpoint and entity id
-        # the poll reads. Payload shape from openHAB's amazonechocontrol.
+    async def _control_direct(self, parameters: dict[str, Any]) -> bool:
+        # Smart-home API first, spoken-text command only as fallback: since
+        # Nov 2026 Alexa answers the text range command with "I'm not quite
+        # sure what went wrong" (the same words work by voice), and the API
+        # also doesn't make the Echo talk back. Same endpoint and entity id
+        # the poll reads; parameter shapes from openHAB's amazonechocontrol.
+        # Without an Alexa entity id configured, text is all we have.
         login = self._get_alexa_login()
         if login is None or not self._alexa_entity_id:
             return False
+        action = parameters.get("action")
         try:
             from alexapy import AlexaAPI
 
@@ -338,13 +338,7 @@ class AlexaBridgeClimate(ClimateEntity, RestoreEntity):
                         {
                             "entityId": self._alexa_entity_id,
                             "entityType": "ENTITY",
-                            "parameters": {
-                                "action": "setTargetTemperature",
-                                "lowerSetTemperature.value": low,
-                                "lowerSetTemperature.scale": "fahrenheit",
-                                "upperSetTemperature.value": high,
-                                "upperSetTemperature.scale": "fahrenheit",
-                            },
+                            "parameters": parameters,
                         }
                     ]
                 },
@@ -352,21 +346,32 @@ class AlexaBridgeClimate(ClimateEntity, RestoreEntity):
             result = await response.json(content_type=None)
         except Exception:  # noqa: BLE001 - private alexapy API, fall back to text
             _LOGGER.warning(
-                "Alexa Thermostat Bridge: direct range set failed, falling back"
-                " to text command",
+                "Alexa Thermostat Bridge: direct %s failed, falling back to"
+                " text command",
+                action,
                 exc_info=True,
             )
             return False
         if response.status >= 400 or (result or {}).get("errors"):
             _LOGGER.warning(
-                "Alexa Thermostat Bridge: direct range set rejected (%s): %s -"
+                "Alexa Thermostat Bridge: direct %s rejected (%s): %s -"
                 " falling back to text command",
+                action,
                 response.status,
                 result,
             )
             return False
-        _LOGGER.debug("Alexa Thermostat Bridge: direct range set ok: %s", result)
+        _LOGGER.debug("Alexa Thermostat Bridge: direct %s ok: %s", action, result)
         return True
+
+    async def _send_mode(self, hvac_mode: HVACMode, mode_word: str) -> None:
+        await self._send(
+            {
+                "action": "setThermostatMode",
+                "thermostatMode.value": HVAC_TO_ALEXA_MODE[hvac_mode],
+            },
+            f"set {self._attr_name} to {mode_word}",
+        )
 
     def _get_alexa_login(self) -> Any | None:
         accounts = self.hass.data.get("alexa_media", {}).get("accounts", {})
@@ -539,11 +544,18 @@ class AlexaBridgeClimate(ClimateEntity, RestoreEntity):
             if round(temperature) == self._alexa.get("single"):
                 self._cancel_command("single")  # back to what Alexa already has
                 return
-            text = f"set {self._attr_name} to {round(temperature)} degrees"
+            target = round(temperature)
             self._schedule_command(
                 "single",
-                lambda: self._send_command(text),
-                {"single": round(temperature)},
+                lambda: self._send(
+                    {
+                        "action": "setTargetTemperature",
+                        "targetTemperature.value": target,
+                        "targetTemperature.scale": "fahrenheit",
+                    },
+                    f"set {self._attr_name} to {target} degrees",
+                ),
+                {"single": target},
             )
             return
 
@@ -578,7 +590,16 @@ class AlexaBridgeClimate(ClimateEntity, RestoreEntity):
         low, high = round(self._range_low), round(self._range_high)
         self._schedule_command(
             "range",
-            lambda: self._send_range(low, high),
+            lambda: self._send(
+                {
+                    "action": "setTargetTemperature",
+                    "lowerSetTemperature.value": low,
+                    "lowerSetTemperature.scale": "fahrenheit",
+                    "upperSetTemperature.value": high,
+                    "upperSetTemperature.scale": "fahrenheit",
+                },
+                f"set {self._attr_name} range between {low} and {high} degrees",
+            ),
             {"low": low, "high": high},
         )
 
@@ -633,7 +654,7 @@ class AlexaBridgeClimate(ClimateEntity, RestoreEntity):
         self.async_write_ha_state()
         try:
             try:
-                await self._send_command(f"set {self._attr_name} to {mode_word}")
+                await self._send_mode(hvac_mode, mode_word)
             except Exception:
                 self._attr_hvac_mode = previous_mode
                 self._sync_target_attrs()
