@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from collections.abc import Awaitable, Callable
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -267,13 +268,16 @@ class AlexaBridgeClimate(ClimateEntity, RestoreEntity):
             cancel()
 
     def _schedule_command(
-        self, key: str, text: str, synced: dict[str, float]
+        self,
+        key: str,
+        send: Callable[[], Awaitable[None]],
+        synced: dict[str, float],
     ) -> None:
         self._cancel_command(key)
 
         async def _fire(_now):
             self._pending_commands.pop(key, None)
-            await self._send_command(text)
+            await send()
             self._alexa.update(synced)
 
         self._pending_commands[key] = async_call_later(
@@ -291,6 +295,64 @@ class AlexaBridgeClimate(ClimateEntity, RestoreEntity):
             },
             blocking=True,
         )
+
+    async def _send_range(self, low: int, high: int) -> None:
+        if await self._set_range_direct(low, high):
+            return
+        await self._send_command(
+            f"set {self._attr_name} range between {low} and {high} degrees"
+        )
+
+    async def _set_range_direct(self, low: int, high: int) -> bool:
+        # Since Nov 2026 Alexa answers the spoken-text range command with
+        # "I'm not quite sure what went wrong" (single setpoint and mode text
+        # commands still work, and the same words work by voice). So set the
+        # range on the smart-home API directly - same endpoint and entity id
+        # the poll reads. Payload shape from openHAB's amazonechocontrol.
+        login = self._get_alexa_login()
+        if login is None or not self._alexa_entity_id:
+            return False
+        try:
+            from alexapy import AlexaAPI
+
+            response = await AlexaAPI._static_request(
+                "put",
+                login,
+                "/api/phoenix/state",
+                data={
+                    "controlRequests": [
+                        {
+                            "entityId": self._alexa_entity_id,
+                            "entityType": "ENTITY",
+                            "parameters": {
+                                "action": "setTargetTemperature",
+                                "lowerSetTemperature.value": low,
+                                "lowerSetTemperature.scale": "fahrenheit",
+                                "upperSetTemperature.value": high,
+                                "upperSetTemperature.scale": "fahrenheit",
+                            },
+                        }
+                    ]
+                },
+            )
+            result = await response.json(content_type=None)
+        except Exception:  # noqa: BLE001 - private alexapy API, fall back to text
+            _LOGGER.warning(
+                "Alexa Thermostat Bridge: direct range set failed, falling back"
+                " to text command",
+                exc_info=True,
+            )
+            return False
+        if response.status >= 400 or (result or {}).get("errors"):
+            _LOGGER.warning(
+                "Alexa Thermostat Bridge: direct range set rejected (%s): %s -"
+                " falling back to text command",
+                response.status,
+                result,
+            )
+            return False
+        _LOGGER.debug("Alexa Thermostat Bridge: direct range set ok: %s", result)
+        return True
 
     def _get_alexa_login(self) -> Any | None:
         accounts = self.hass.data.get("alexa_media", {}).get("accounts", {})
@@ -459,9 +521,10 @@ class AlexaBridgeClimate(ClimateEntity, RestoreEntity):
             if round(temperature) == self._alexa.get("single"):
                 self._cancel_command("single")  # back to what Alexa already has
                 return
+            text = f"set {self._attr_name} to {round(temperature)} degrees"
             self._schedule_command(
                 "single",
-                f"set {self._attr_name} to {round(temperature)} degrees",
+                lambda: self._send_command(text),
                 {"single": round(temperature)},
             )
             return
@@ -494,11 +557,11 @@ class AlexaBridgeClimate(ClimateEntity, RestoreEntity):
         ):
             self._cancel_command("range")  # back to what Alexa already has
             return
+        low, high = round(self._range_low), round(self._range_high)
         self._schedule_command(
             "range",
-            f"set {self._attr_name} range between"
-            f" {round(self._range_low)} and {round(self._range_high)} degrees",
-            {"low": self._range_low, "high": self._range_high},
+            lambda: self._send_range(low, high),
+            {"low": low, "high": high},
         )
 
     async def async_set_hvac_mode(self, hvac_mode: HVACMode) -> None:
