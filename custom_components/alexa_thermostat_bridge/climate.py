@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 from collections.abc import Awaitable, Callable
 from datetime import datetime, timedelta
 from typing import Any
@@ -59,6 +60,15 @@ HVAC_TO_ALEXA_MODE = {v: k for k, v in ALEXA_MODE_TO_HVAC.items()}
 # release - without this, each intermediate value became a real spoken
 # Alexa command and they raced each other.
 COMMAND_DEBOUNCE = 4
+
+# Alexa takes several seconds to apply a setpoint, so a poll landing just
+# after a send reads the *old* values. Taking them would yank the dial back
+# and, worse, the next drag would resend that stale other end. Polls leave
+# setpoints alone while a command is debouncing and for this long after it
+# goes out (same ~20s ceiling the mode confirm loop allows).
+# ponytail: fixed window, switch to "until Alexa reports what we sent" if
+# Alexa ever routinely takes longer.
+SETPOINT_SETTLE = 20
 
 # After a mode switch, poll every MODE_CONFIRM_RETRY_DELAY seconds until
 # Alexa reports the mode we just set, up to MODE_CONFIRM_MAX_ATTEMPTS times
@@ -132,6 +142,7 @@ class AlexaBridgeClimate(ClimateEntity, RestoreEntity):
         # Lets us skip a command when the user drags away and back to the same
         # values. Empty = unknown, so always send.
         self._alexa: dict[str, float] = {}
+        self._settle_until = 0.0  # time.monotonic(); see SETPOINT_SETTLE
         # Shrinking hvac_modes during a switch (see _lock_interactions)
         # only stops the *card* from offering other modes - it doesn't
         # stop a second async_set_hvac_mode call that's already in flight
@@ -276,6 +287,9 @@ class AlexaBridgeClimate(ClimateEntity, RestoreEntity):
         self._cancel_command(key)
 
         async def _fire(_now):
+            # Set before awaiting: the send itself can take seconds, and a
+            # poll during it must already be held off.
+            self._settle_until = time.monotonic() + SETPOINT_SETTLE
             self._pending_commands.pop(key, None)
             await send()
             self._alexa.update(synced)
@@ -420,24 +434,28 @@ class AlexaBridgeClimate(ClimateEntity, RestoreEntity):
         if update_mode and mode_raw in ALEXA_MODE_TO_HVAC:
             self._attr_hvac_mode = ALEXA_MODE_TO_HVAC[mode_raw]
 
+        # Skip setpoints entirely while ours are in flight - including
+        # self._alexa, or a stale read would later make a real change look
+        # like "already what Alexa has" and get skipped.
+        settling = self._pending_commands or time.monotonic() < self._settle_until
         target = self._fahrenheit(
             capabilities.get(("Alexa.ThermostatController", "targetSetpoint"))
         )
-        if target is not None:
+        if target is not None and not settling:
             self._single_target = target
             self._alexa["single"] = round(target)
 
         low = self._fahrenheit(
             capabilities.get(("Alexa.ThermostatController", "lowerSetpoint"))
         )
-        if low is not None:
+        if low is not None and not settling:
             self._range_low = round(low)
             self._alexa["low"] = self._range_low
 
         high = self._fahrenheit(
             capabilities.get(("Alexa.ThermostatController", "upperSetpoint"))
         )
-        if high is not None:
+        if high is not None and not settling:
             self._range_high = round(high)
             self._alexa["high"] = self._range_high
 
