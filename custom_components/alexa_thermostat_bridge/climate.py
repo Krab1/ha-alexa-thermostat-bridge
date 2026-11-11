@@ -83,7 +83,7 @@ class AlexaBridgeClimate(ClimateEntity, RestoreEntity):
         | ClimateEntityFeature.TURN_ON
         | ClimateEntityFeature.TURN_OFF
     )
-    _attr_temperature_unit = UnitOfTemperature.FAHRENHEIT
+    _attr_native_temperature_unit = UnitOfTemperature.FAHRENHEIT
     _attr_should_poll = False
     _attr_translation_key = "alexa_bridge_thermostat"
 
@@ -119,10 +119,10 @@ class AlexaBridgeClimate(ClimateEntity, RestoreEntity):
         self._range_low = mid - 2
         self._range_high = mid + 2
 
-        self._attr_target_temperature = None
-        self._attr_target_temperature_low = None
-        self._attr_target_temperature_high = None
-        self._attr_current_temperature = None
+        self._attr_native_target_temperature = None
+        self._attr_native_target_temperature_low = None
+        self._attr_native_target_temperature_high = None
+        self._attr_native_current_temperature = None
         self._attr_current_humidity = None
         self._attr_hvac_action = None
         self._attr_extra_state_attributes = {}
@@ -197,17 +197,17 @@ class AlexaBridgeClimate(ClimateEntity, RestoreEntity):
         # both stay None so the dial disappears/greys out - Alexa isn't
         # going to act on a temperature while the thermostat is off.
         if self._attr_hvac_mode == HVACMode.OFF:
-            self._attr_target_temperature = None
-            self._attr_target_temperature_low = None
-            self._attr_target_temperature_high = None
+            self._attr_native_target_temperature = None
+            self._attr_native_target_temperature_low = None
+            self._attr_native_target_temperature_high = None
         elif self._attr_hvac_mode == HVACMode.HEAT_COOL:
-            self._attr_target_temperature = None
-            self._attr_target_temperature_low = self._range_low
-            self._attr_target_temperature_high = self._range_high
+            self._attr_native_target_temperature = None
+            self._attr_native_target_temperature_low = self._range_low
+            self._attr_native_target_temperature_high = self._range_high
         else:
-            self._attr_target_temperature = self._single_target
-            self._attr_target_temperature_low = None
-            self._attr_target_temperature_high = None
+            self._attr_native_target_temperature = self._single_target
+            self._attr_native_target_temperature_low = None
+            self._attr_native_target_temperature_high = None
 
     def _lock_interactions(self) -> None:
         # Shrinking hvac_modes to just the current mode removes every other
@@ -248,9 +248,9 @@ class AlexaBridgeClimate(ClimateEntity, RestoreEntity):
 
     def _update_current_temperature(self, state: State) -> None:
         try:
-            self._attr_current_temperature = float(state.state)
+            self._attr_native_current_temperature = float(state.state)
         except ValueError:
-            self._attr_current_temperature = None
+            self._attr_native_current_temperature = None
 
     @callback
     def _cancel_pending_commands(self) -> None:
@@ -388,9 +388,9 @@ class AlexaBridgeClimate(ClimateEntity, RestoreEntity):
         )
         local_temp = self._local_sensor_temperature()
         if local_temp is not None:
-            self._attr_current_temperature = local_temp
+            self._attr_native_current_temperature = local_temp
         elif precise_temp is not None:
-            self._attr_current_temperature = precise_temp
+            self._attr_native_current_temperature = precise_temp
 
         humidity = capabilities.get(("Alexa.HumiditySensor", "relativeHumidity"))
         if humidity is not None:
